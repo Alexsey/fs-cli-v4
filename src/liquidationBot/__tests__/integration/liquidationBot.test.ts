@@ -411,6 +411,23 @@ describe("liquidationBot", () => {
   });
 
   describe("extensions", () => {
+    describe("rate limits", () => {
+      describe("on liquidations checks", () => {
+        it("respects", async () => {
+          const { mockChangePositionEvents, start, consts } =
+            setupMocks(liquidationBot);
+          consts.checkerRetryIntervalSec = 0.1; // 100ms
+          openPositions(mockChangePositionEvents, ["trader1"]);
+
+          start();
+          collectBotEvents("tradersChecked");
+          await setTimeout(1000); // 10 events with throttle to 100ms ~= 1000ms
+
+          expect(botEvents).toHaveLength(10);
+        });
+      });
+    });
+
     describe("with support isLiquidatable checkers", () => {
       describe("when support checker is a duplicate of the main one", () => {
         it("should liquidate liquidatable trader", async () => {

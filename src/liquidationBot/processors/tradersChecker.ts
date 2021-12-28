@@ -38,6 +38,7 @@ export function start(
   const liquidatableTradersGenerators = liquidatableTradersFilters.map(
     (liquidatableTradersFilter) =>
       async function* () {
+        let lastCallAt = 0;
         while (true) {
           if (isEmpty(traders)) {
             await once(tradersEvents, "gotActiveTraders");
@@ -50,6 +51,7 @@ export function start(
             if (checkedTraders instanceof Error) {
               yield checkedTraders;
             }
+            lastCallAt = Date.now();
             const newLiquidatableTraders: Trader[] = [];
             let hadNewData = false;
             for (const check of Object.entries(checkedTraders)) {
@@ -68,7 +70,10 @@ export function start(
               yield newLiquidatableTraders;
             }
           }
-          await setTimeout(reCheckIntervalSec * 1_000);
+          const sinceLastCall = Date.now() - lastCallAt;
+          if (sinceLastCall < reCheckIntervalSec * 1_000) {
+            await setTimeout(reCheckIntervalSec * 1_000 - sinceLastCall);
+          }
         }
       }
   );
