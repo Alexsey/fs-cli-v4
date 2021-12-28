@@ -77,6 +77,30 @@ export const getProvider = <T = {}>(
   return { network, provider };
 };
 
+export const getSupportProviders = <T = {}>(
+  argv: GetProviderArgv<T>
+): Provider[] => {
+  const { network } = getNetwork(argv);
+  const chainId = checkDefined(
+    process.env[`${network}_CHAINID`],
+    `Missing ${network}_CHAINID in your .env file, see README.md`
+  );
+
+  return [`${network}_RPC_URL_SUPPORT`].map((rpcUrlEnvVarName) => {
+    const url = checkDefined(
+      rpcUrlEnvVarName,
+      `Missing ${rpcUrlEnvVarName} in .env file`
+    );
+
+    const provider = new JsonRpcProvider(url, {
+      name: "json-rpc",
+      chainId: Number(chainId),
+    });
+
+    return provider;
+  });
+};
+
 /**
  * Commands that update the chain state need a signer.  But a number of commands only read from the
  * change and do not need parameters that are needed to get a singer.

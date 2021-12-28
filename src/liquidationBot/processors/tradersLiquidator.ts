@@ -3,6 +3,7 @@ import type { LiquidationsResults } from "@liquidationBot/services";
 import { WritableOptions, Duplex, Readable, Writable } from "node:stream";
 import { EventEmitter, once } from "node:events";
 import { setTimeout } from "node:timers/promises";
+import _ from "lodash";
 import { CheckError, LiquidationError } from "@liquidationBot/errors";
 import { exchangeService } from "@liquidationBot/services";
 import { FilterLiquidatableTraders } from "@liquidationBot/services/liquidationBot";
@@ -20,7 +21,7 @@ export type TradersLiquidatorProcessor = Duplex & {
 
 export function start(
   exchange: IExchange,
-  filterLiquidatableTraders: FilterLiquidatableTraders,
+  liquidatableTradersFilters: FilterLiquidatableTraders[],
   retryIntervalSec: number
 ): TradersLiquidatorProcessor {
   const liquidatableTraders = new Set<Trader>();
@@ -68,7 +69,10 @@ export function start(
        */
       const erroredTraders = liquidationsErrors.map(({ trader }) => trader);
       const { nonLiquidatableTraders, liquidatableChecksErrors } =
-        await filterNonLiquidatableTraders(erroredTraders);
+        await filterNonLiquidatableTraders(
+          erroredTraders,
+          liquidatableTradersFilters
+        );
       nonLiquidatableTraders.forEach((nonLiquidatableTrader) => {
         liquidatableTraders.delete(nonLiquidatableTrader);
       });
@@ -78,19 +82,49 @@ export function start(
     }
   };
 
-  async function filterNonLiquidatableTraders(traders: Trader[]) {
+  async function filterNonLiquidatableTraders(
+    traders: Trader[],
+    liquidatableTradersFilters: FilterLiquidatableTraders[]
+  ) {
     const nonLiquidatableTraders = new Set<Trader>(traders);
     const liquidatableChecksErrors: CheckError[] = [];
+    let returnResults: (value?: unknown) => void;
+    let throwOnUnexpectedError: (error: Error) => void;
+    const someFilterSucceedOrAllFails = new Promise((resolve, reject) => {
+      returnResults = resolve;
+      throwOnUnexpectedError = reject;
+    });
+    let processed = 0;
 
-    for await (const checkResult of filterLiquidatableTraders(traders)) {
-      if (checkResult instanceof CheckError) {
-        liquidatableChecksErrors.push(checkResult);
-      } else {
-        checkResult.forEach((liquidatableTrader) => {
-          nonLiquidatableTraders.delete(liquidatableTrader);
-        });
-      }
+    for (const filter of liquidatableTradersFilters) {
+      (async () => {
+        let gotSomeNonErrorResults = false;
+        for await (const checkResult of filter(traders)) {
+          if (checkResult instanceof CheckError) {
+            liquidatableChecksErrors.push(checkResult);
+          } else {
+            gotSomeNonErrorResults = true;
+            _(checkResult)
+              .pickBy(Boolean)
+              .keys()
+              .forEach((trader) =>
+                nonLiquidatableTraders.delete(trader as Trader)
+              );
+          }
+        }
+        return gotSomeNonErrorResults;
+      })().then(
+        (gotSomeNonErrorResults) => {
+          const allProcessed = ++processed == liquidatableTradersFilters.length;
+          if (allProcessed || gotSomeNonErrorResults) {
+            returnResults();
+          }
+        },
+        (unexpectedError: Error) => throwOnUnexpectedError(unexpectedError)
+      );
     }
+
+    await someFilterSucceedOrAllFails;
 
     return {
       nonLiquidatableTraders,

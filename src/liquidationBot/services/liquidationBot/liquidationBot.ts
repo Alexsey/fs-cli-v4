@@ -1,9 +1,11 @@
 import type { Trader } from "@liquidationBot/types";
 import type { LiquidationBotApi } from "@generated/LiquidationBotApi";
-import { chunk } from "lodash";
+import { chunk, zipObject } from "lodash";
 import { CheckError } from "@liquidationBot/errors";
 
-export type LiquidatableTradersCheckResult = Trader[] | CheckError;
+export type LiquidatableTradersCheckResult =
+  | { [k in Trader]: boolean }
+  | CheckError;
 
 export type ConstructFilter = (
   liquidationBotApi: LiquidationBotApi,
@@ -30,12 +32,7 @@ export const constructFilterLiquidatableTraders: ConstructFilter = (
             chunkOfTraders
           );
 
-        const liquidatableTraders = areLiquidatable.flatMap(
-          (isLiquidatable, i) =>
-            isLiquidatable ? traders[chunkIndex * chunkSize + i] : []
-        );
-
-        yield liquidatableTraders;
+        yield zipObject(chunkOfTraders, areLiquidatable) as { Trader: boolean };
       } catch (error) {
         yield new CheckError(
           chunkOfTraders,

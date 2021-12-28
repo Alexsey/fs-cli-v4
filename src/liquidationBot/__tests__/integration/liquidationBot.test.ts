@@ -1,4 +1,5 @@
 import type { LiquidationBotEvents } from "@liquidationBot/reporting";
+import { setTimeout } from "node:timers/promises";
 import { LiquidationError } from "@liquidationBot/errors";
 import { BigNumber } from "ethers";
 import { LiquidationBot, liquidationBot } from "@liquidationBot/bot";
@@ -26,6 +27,7 @@ const setupMocks = (
     () => Promise<ChangePositionEventResult[]>
   >;
   mockLiquidate: jest.MockedFunction<() => Promise<Symbol>>;
+  mockSupportIsLiquidatable: jest.Mock[];
   mockIsLiquidatable: jest.Mock;
   start: () => void;
   consts: {
@@ -67,6 +69,8 @@ const setupMocks = (
     maxTradersPerLiquidationCheck: 1000,
   };
 
+  const mockSupportIsLiquidatable: jest.Mock[] = [];
+
   const mockProvider = {
     getBlockNumber: () => 10,
   } as any as Provider;
@@ -85,7 +89,15 @@ const setupMocks = (
       consts.fetcherRetryIntervalSec,
       consts.checkerRetryIntervalSec,
       consts.liquidatorRetryIntervalSec,
-      consts.maxTradersPerLiquidationCheck
+      consts.maxTradersPerLiquidationCheck,
+      {
+        supportLiquidationBotApis: mockSupportIsLiquidatable.map(
+          (isLiquidatable) =>
+            ({
+              callStatic: { isLiquidatable },
+            } as any as LiquidationBotApi)
+        ),
+      }
     );
   };
 
@@ -95,6 +107,7 @@ const setupMocks = (
     mockIsLiquidatable,
     start,
     consts,
+    mockSupportIsLiquidatable,
   };
 };
 
@@ -395,6 +408,282 @@ describe("liquidationBot", () => {
     expect(trader3).toEqual("trader201");
     expect(trader4).toEqual("trader301");
     expect(trader5).toEqual("trader401");
+  });
+
+  describe("extensions", () => {
+    describe("with support isLiquidatable checkers", () => {
+      describe("when support checker is a duplicate of the main one", () => {
+        it("should liquidate liquidatable trader", async () => {
+          const {
+            mockChangePositionEvents,
+            mockLiquidate,
+            mockIsLiquidatable,
+            mockSupportIsLiquidatable,
+            start,
+          } = setupMocks(liquidationBot);
+
+          openPositions(mockChangePositionEvents, ["trader1"]);
+          mockIsLiquidatable.mockResolvedValueOnce([true]);
+          mockSupportIsLiquidatable.push(
+            jest.fn().mockResolvedValueOnce([true])
+          );
+          const mockLiquidationResult = Symbol("mockLiquidationResult");
+          mockLiquidate.mockResolvedValueOnce(mockLiquidationResult);
+
+          start();
+          const [{ trader }] = await onceBotEvents(["traderLiquidated"]);
+
+          expect(trader).toEqual("trader1");
+        });
+      });
+
+      describe("when support checker working slower than the main one", () => {
+        it("shouldn't try to liquidate twice the same trader when response from the slow checker is obtained", async () => {
+          const {
+            mockChangePositionEvents,
+            mockLiquidate,
+            mockIsLiquidatable,
+            mockSupportIsLiquidatable,
+            start,
+          } = setupMocks(liquidationBot);
+
+          openPositions(mockChangePositionEvents, ["trader1"]);
+          mockIsLiquidatable.mockImplementationOnce(async () => {
+            await setTimeout(20);
+            return [true];
+          });
+          mockSupportIsLiquidatable.push(
+            jest.fn().mockImplementationOnce(async () => {
+              await setTimeout(50);
+              return [true];
+            })
+          );
+          const mockLiquidationResult = Symbol("mockLiquidationResult");
+          mockLiquidate.mockResolvedValue(mockLiquidationResult);
+
+          start();
+          collectBotEvents("traderLiquidated");
+          await setTimeout(80);
+
+          expect(botEvents).toHaveLength(1);
+        });
+      });
+
+      describe("retry on liquidation error", () => {
+        it("should emit error when both checkers fell", async () => {
+          const {
+            mockChangePositionEvents,
+            mockLiquidate,
+            mockIsLiquidatable,
+            start,
+            mockSupportIsLiquidatable,
+            consts,
+          } = setupMocks(liquidationBot);
+
+          // For a simpler stubbing, ensure that tradersChecker processor
+          // wouldn't get called twice during the test
+          consts.checkerRetryIntervalSec = 0.5;
+          openPositions(mockChangePositionEvents, ["trader1"]);
+          mockIsLiquidatable
+            // call in check processor
+            .mockResolvedValueOnce([true])
+            // call before retry
+            .mockImplementationOnce(async () => {
+              await setTimeout(20);
+              throw Error("mock primary liquidation checker error");
+            });
+          mockSupportIsLiquidatable.push(
+            jest
+              .fn()
+              // call in check processor
+              .mockResolvedValueOnce([true])
+              // call before retry
+              .mockImplementationOnce(async () => {
+                await setTimeout(50);
+                throw Error("mock support liquidation check error");
+              })
+          );
+          mockLiquidate.mockRejectedValueOnce(Error("mock liquidate error"));
+
+          start();
+          collectBotEvents("tradersChecked", "traderLiquidated", "error");
+          const [
+            { error: liquidationError },
+            { error: primaryLiquidationCheckerError },
+            { error: supportLiquidationCheckerError },
+          ] = await onceBotEvents([
+            "error", // mock liquidate error
+            "error", // mock primary liquidate checkers errors
+            "error", // mock secondary liquidate checkers errors
+            "tradersChecked", // means the bot didn't crash or freeze after all errors
+          ]);
+
+          // @ts-ignore
+          expect(liquidationError.cause.message).toBe("mock liquidate error");
+          // @ts-ignore
+          expect(primaryLiquidationCheckerError.cause.message).toBe(
+            "mock primary liquidation checker error"
+          );
+          // @ts-ignore
+          expect(supportLiquidationCheckerError.cause.message).toBe(
+            "mock support liquidation check error"
+          );
+        });
+
+        it("should use the result of the faster checker when both succeed", async () => {
+          const {
+            mockChangePositionEvents,
+            mockLiquidate,
+            mockIsLiquidatable,
+            start,
+            mockSupportIsLiquidatable,
+            consts,
+          } = setupMocks(liquidationBot);
+
+          // For a simpler stubbing, ensure that tradersChecker processor
+          // wouldn't get called twice during the test
+          consts.checkerRetryIntervalSec = 0.5;
+          openPositions(mockChangePositionEvents, ["trader1"]);
+          mockIsLiquidatable
+            // call in check processor
+            .mockResolvedValueOnce([true])
+            // call before retry
+            .mockImplementationOnce(async () => {
+              await setTimeout(20);
+              return [false];
+            });
+          mockSupportIsLiquidatable.push(
+            jest
+              .fn()
+              // call in check processor
+              .mockResolvedValueOnce([true])
+              // call before retry
+              .mockImplementationOnce(async () => {
+                await setTimeout(50);
+                return [true];
+              })
+          );
+          mockLiquidate.mockRejectedValueOnce(Error("mock liquidate error"));
+
+          start();
+          collectBotEvents("tradersChecked", "traderLiquidated", "error");
+          const [{ error: liquidationError }] = await onceBotEvents(["error"]);
+          await setTimeout(200); // wait for tradersLiquidator cycle to be 100% finished
+
+          expect(botEvents).not.toIncludeAllPartialMembers([
+            { type: "traderLiquidated" },
+          ]);
+        });
+
+        it("should use the result of the slower checker when faster fell", async () => {
+          const {
+            mockChangePositionEvents,
+            mockLiquidate,
+            mockIsLiquidatable,
+            start,
+            mockSupportIsLiquidatable,
+            consts,
+          } = setupMocks(liquidationBot);
+
+          // For a simpler stubbing, ensure that tradersChecker processor
+          // wouldn't get called twice during the test
+          consts.checkerRetryIntervalSec = 0.5;
+          openPositions(mockChangePositionEvents, ["trader1"]);
+          mockIsLiquidatable
+            // call in check processor
+            .mockResolvedValueOnce([true])
+            // call before retry
+            .mockImplementationOnce(async () => {
+              await setTimeout(20);
+              throw Error("mock primary liquidation checker error");
+            });
+          mockSupportIsLiquidatable.push(
+            jest
+              .fn()
+              // call in check processor
+              .mockResolvedValueOnce([true])
+              // call before retry
+              .mockImplementationOnce(async () => {
+                await setTimeout(50);
+                return [true];
+              })
+          );
+          mockLiquidate.mockRejectedValueOnce(Error("mock liquidate error"));
+
+          start();
+          collectBotEvents("tradersChecked", "traderLiquidated", "error");
+          const [
+            { error: liquidationError },
+            { error: primaryLiquidationCheckerError },
+            { trader: liquidatedTrader },
+          ] = await onceBotEvents([
+            "error", // mock liquidate error
+            "error", // mock primary liquidate checkers errors
+            "traderLiquidated", // mock secondary liquidate checkers errors
+          ]);
+
+          // @ts-ignore
+          expect(liquidationError.cause.message).toBe("mock liquidate error");
+          // @ts-ignore
+          expect(primaryLiquidationCheckerError.cause.message).toBe(
+            "mock primary liquidation checker error"
+          );
+          expect(liquidatedTrader).toBe("trader1");
+        });
+
+        it("should use the result of the faster checker when faster succeed and slower fell", async () => {
+          const {
+            mockChangePositionEvents,
+            mockLiquidate,
+            mockIsLiquidatable,
+            start,
+            mockSupportIsLiquidatable,
+            consts,
+          } = setupMocks(liquidationBot);
+
+          // For a simpler stubbing, ensure that tradersChecker processor
+          // wouldn't get called twice during the test
+          consts.checkerRetryIntervalSec = 0.5;
+          openPositions(mockChangePositionEvents, ["trader1"]);
+          mockIsLiquidatable
+            // call in check processor
+            .mockResolvedValueOnce([true])
+            // call before retry
+            .mockImplementationOnce(async () => {
+              await setTimeout(20);
+              return [true];
+            });
+          mockSupportIsLiquidatable.push(
+            jest
+              .fn()
+              // call in check processor
+              .mockResolvedValueOnce([true])
+              // call before retry
+              .mockImplementationOnce(async () => {
+                await setTimeout(50);
+                throw Error("mock secondary liquidation checker error");
+              })
+          );
+          mockLiquidate.mockRejectedValueOnce(Error("mock liquidate error"));
+
+          start();
+          collectBotEvents("tradersChecked", "traderLiquidated", "error");
+          const [{ error: liquidationError }, { trader: liquidatedTrader }] =
+            await onceBotEvents([
+              "error", // mock liquidate error"error"
+              "traderLiquidated", // mock secondary liquidate checkers errors
+            ]);
+          await setTimeout(200); // wait for tradersLiquidator cycle to be 100% finished
+
+          // @ts-ignore
+          expect(liquidationError.cause.message).toBe("mock liquidate error");
+          expect(liquidatedTrader).toBe("trader1");
+          expect(botEvents.filter(({ type }) => type == "error")).toHaveLength(
+            1
+          );
+        });
+      });
+    });
   });
 });
 

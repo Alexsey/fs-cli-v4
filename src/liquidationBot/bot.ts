@@ -36,6 +36,7 @@ export type LiquidationBot = Reportable & {
     checkerRetryIntervalSec: number,
     liquidatorRetryIntervalSec: number,
     maxTradersPerLiquidationCheck: number,
+    extras: { supportLiquidationBotApis: LiquidationBotApi[] }
   ) => Promise<void>;
   join: () => Promise<void>;
   stop: () => Promise<void>;
@@ -91,17 +92,23 @@ function start(
   fetcherRetryIntervalSec: number,
   checkerRetryIntervalSec: number,
   liquidatorRetryIntervalSec: number,
-  maxTradersPerLiquidationCheck: number
+  maxTradersPerLiquidationCheck: number,
+  {
+    supportLiquidationBotApis,
+  }: { supportLiquidationBotApis: LiquidationBotApi[] }
 ) {
   if (isRunning) {
     throw Error("Cannot start liquidation bot - it is already running");
   }
   botAbortController = new AbortController();
 
-  const filterLiquidatableTraders = constructFilterLiquidatableTraders(
-    liquidationBotApi,
-    exchange.address,
-    maxTradersPerLiquidationCheck
+  const liquidationBotApis = [liquidationBotApi, ...supportLiquidationBotApis];
+  const liquidatableTradersFilters = liquidationBotApis.map((api) =>
+    constructFilterLiquidatableTraders(
+      api,
+      exchange.address,
+      maxTradersPerLiquidationCheck
+    )
   );
 
   return (isRunning = pipeline(
@@ -115,12 +122,12 @@ function start(
     fetcherToCheckerAdapterAndReporter,
     tradersCheckerProcessor.start(
       checkerRetryIntervalSec,
-      filterLiquidatableTraders
+      liquidatableTradersFilters
     ),
     checkerToLiquidatorAdapterAndReporter,
     tradersLiquidatorProcessor.start(
       exchange,
-      filterLiquidatableTraders,
+      liquidatableTradersFilters,
       liquidatorRetryIntervalSec
     ),
     liquidatorReporter,

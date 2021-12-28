@@ -1,20 +1,22 @@
+import type { CheckError } from "@liquidationBot/errors";
 import type { WritableOptions } from "node:stream";
 import type { Trader } from "@liquidationBot/types";
-import type { LiquidatableTradersCheckResult } from "@liquidationBot/services";
-import { Readable, Writable, Duplex } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { Writable, Duplex, PassThrough } from "node:stream";
 import { EventEmitter, once } from "node:events";
 import { setTimeout } from "node:timers/promises";
 import { FilterLiquidatableTraders } from "@liquidationBot/services/liquidationBot";
+import { isEmpty } from "lodash";
 
 export type TradersCheckerProcessor = Duplex & {
-  [Symbol.asyncIterator](): AsyncIterableIterator<LiquidatableTradersCheckResult>;
+  [Symbol.asyncIterator](): AsyncIterableIterator<Trader[] | CheckError>;
 };
 
 export function start(
   reCheckIntervalSec: number,
-  filterLiquidatableTraders: FilterLiquidatableTraders
+  liquidatableTradersFilters: FilterLiquidatableTraders[]
 ): TradersCheckerProcessor {
-  let traders: Trader[] = [];
+  let traders: { [k in Trader]: number | null } = {};
   const tradersEvents = new EventEmitter();
 
   const saveActiveTraders: WritableOptions["write"] = (
@@ -22,27 +24,64 @@ export function start(
     _: never, // encoding. Irrelevant for streams in object mode
     callback: (error?: Error) => void
   ) => {
-    traders = activeTraders;
+    traders = Object.fromEntries(
+      activeTraders.map((trader) => [trader, traders[trader] ?? null])
+    );
 
-    if (traders.length) {
+    if (!isEmpty(traders)) {
       tradersEvents.emit("gotActiveTraders", true);
     }
 
     callback();
   };
 
-  const liquidatableTradersGenerator = async function* () {
-    while (true) {
-      if (!traders.length) {
-        await once(tradersEvents, "gotActiveTraders");
+  const liquidatableTradersGenerators = liquidatableTradersFilters.map(
+    (liquidatableTradersFilter) =>
+      async function* () {
+        while (true) {
+          if (isEmpty(traders)) {
+            await once(tradersEvents, "gotActiveTraders");
+          }
+          const activeTraders = Object.keys(traders) as Trader[];
+          const checkedAt = Date.now();
+          for await (const checkedTraders of liquidatableTradersFilter(
+            activeTraders
+          )) {
+            if (checkedTraders instanceof Error) {
+              yield checkedTraders;
+            }
+            const newLiquidatableTraders: Trader[] = [];
+            let hadNewData = false;
+            for (const check of Object.entries(checkedTraders)) {
+              const [trader, isLiquidatable] = check as [Trader, boolean];
+              const traderLastCheckedAt = traders[trader];
+              if (traderLastCheckedAt && traderLastCheckedAt >= checkedAt) {
+                continue;
+              }
+              hadNewData = true;
+              traders[trader] = checkedAt;
+              if (isLiquidatable) {
+                newLiquidatableTraders.push(trader);
+              }
+            }
+            if (hadNewData) {
+              yield newLiquidatableTraders;
+            }
+          }
+          await setTimeout(reCheckIntervalSec * 1_000);
+        }
       }
-      yield* filterLiquidatableTraders(traders);
-      await setTimeout(reCheckIntervalSec * 1_000);
-    }
-  };
+  );
+
+  const liquidatableTraders = new PassThrough({ objectMode: true });
+  for (const liquidatableTradersGenerator of liquidatableTradersGenerators) {
+    pipeline(liquidatableTradersGenerator(), liquidatableTraders).catch(
+      () => {} // ignore abort signal
+    );
+  }
 
   return Duplex.from({
     writable: new Writable({ write: saveActiveTraders, objectMode: true }),
-    readable: Readable.from(liquidatableTradersGenerator()),
+    readable: liquidatableTraders,
   });
 }

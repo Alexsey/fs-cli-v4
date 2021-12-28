@@ -9,6 +9,7 @@ import {
   checkDefined,
   ExchangeArgs,
   GetExchangeWithSignerArgv,
+  getSupportProviders,
   WithSignerArgs,
 } from "@config/common";
 import { liquidationBot } from "./bot";
@@ -120,6 +121,8 @@ export const run = async (
     "Internal error: Signer for the exchange does not have a provider"
   );
 
+  const supportProviders = getSupportProviders(argv);
+
   const {
     liquidationBotApi,
     exchangeLaunchBlock,
@@ -129,7 +132,8 @@ export const run = async (
     liquidatorRetryIntervalSec,
     maxTradersPerLiquidationCheck,
     reporting: reportingType,
-  } = getLiquidationBotArgs(network, provider, argv);
+    supportLiquidationBotApis,
+  } = getLiquidationBotArgs(network, provider, supportProviders, argv);
 
   const bot = liquidationBot.start(
     provider,
@@ -141,7 +145,8 @@ export const run = async (
     fetcherRetryIntervalSec,
     checkerRetryIntervalSec,
     liquidatorRetryIntervalSec,
-    maxTradersPerLiquidationCheck
+    maxTradersPerLiquidationCheck,
+    { supportLiquidationBotApis }
   );
 
   let reportingProcess =
@@ -160,6 +165,7 @@ const DEFAULT_LIQUIDATION_BOT_API: { [network: string]: string } = {
 const getLiquidationBotArgs = <T = {}>(
   network: string,
   provider: Provider,
+  supportProviders: Provider[],
   argv: Arguments<LiquidationBotArgs<T>>
 ): {
   liquidationBotApi: LiquidationBotApi;
@@ -170,6 +176,7 @@ const getLiquidationBotArgs = <T = {}>(
   liquidatorRetryIntervalSec: number;
   maxTradersPerLiquidationCheck: number;
   reporting: "console" | "pm2";
+  supportLiquidationBotApis: LiquidationBotApi[];
 } => {
   const liquidationBotApiAddress = getStringArg(
     "liquidation-bot",
@@ -183,6 +190,10 @@ const getLiquidationBotArgs = <T = {}>(
   const liquidationBotApi = LiquidationBotApi__factory.connect(
     liquidationBotApiAddress,
     provider
+  );
+
+  const supportLiquidationBotApis = supportProviders.map((provider) =>
+    LiquidationBotApi__factory.connect(liquidationBotApiAddress, provider)
   );
 
   const exchangeLaunchBlock = getNumberArg(
@@ -251,5 +262,6 @@ const getLiquidationBotArgs = <T = {}>(
     liquidatorRetryIntervalSec,
     maxTradersPerLiquidationCheck,
     reporting,
+    supportLiquidationBotApis,
   };
 };
