@@ -1,10 +1,10 @@
-import type { CheckError } from "@liquidationBot/errors";
 import type { WritableOptions } from "node:stream";
 import type { Trader } from "@liquidationBot/types";
 import { pipeline } from "node:stream/promises";
 import { Writable, Duplex, PassThrough } from "node:stream";
 import { EventEmitter, once } from "node:events";
 import { setTimeout } from "node:timers/promises";
+import { CheckError } from "@liquidationBot/errors";
 import { FilterLiquidatableTraders } from "@liquidationBot/services/liquidationBot";
 import { isEmpty } from "lodash";
 
@@ -48,8 +48,9 @@ export function start(
           for await (const checkedTraders of liquidatableTradersFilter(
             activeTraders
           )) {
-            if (checkedTraders instanceof Error) {
+            if (checkedTraders instanceof CheckError) {
               yield checkedTraders;
+              continue;
             }
             lastCallAt = Date.now();
             const newLiquidatableTraders: Trader[] = [];
